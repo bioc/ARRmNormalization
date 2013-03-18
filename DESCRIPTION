@@ -1,0 +1,12 @@
+Package: ARRmNormalization
+Type: Package
+Title: Adaptive Robust Regression normalization for Illumina
+        methylation data
+Version: 0.99.1
+Date: 2013-01-10
+Author: Jean-Philippe Fortin, Celia M.T. Greenwood, Aurelie Labbe.
+Depends: R (>= 2.15.3), ARRmData
+Maintainer: Jean-Philippe Fortin <jfortin@jhsph.edu>
+Description: Perform the Adaptive Robust Regression method (ARRm) for the normalization of methylation data from the Illumina Infinium HumanMethylation 450k assay. 
+License: Artistic-2.0
+biocViews: DNAMethylation, TwoChannel, Preprocessing, Microarray

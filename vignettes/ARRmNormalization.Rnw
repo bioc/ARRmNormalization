@@ -1,0 +1,396 @@
+%\VignetteIndexEntry{ARRmNormalization}
+\documentclass{article}
+\title{ARRm: Adaptive Robust Regression method for normalization of methylation data}
+\author{Jean-Philippe Fortin, Aur\'elie Labbe and Celia M.T. Greenwood}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+
+
+\maketitle{}
+
+\section{Introduction}
+
+With the adaptation of microarray hybridization techniques developed for gene expression and genomics studies to methylation data, there has been a revolution in the development of DNA methylation profiling techniques \cite{Laird2010}. Illumina recently released the Infinium HumanMethylation450 BeadChip, a single CpG site resolution array using bisulfite-converted DNA. The Infinium 450k methylation array comprises two different chemistry technologies (Infinium I and II). Microarray methylation data can be affected by technical artifacts, like any microarray-based assay. Signals can be affected by the position of the probes on the chip, probe design, inter-batch differences in chips, laboratory conditions or other unknown factors. In gene-expression studies, quantile normalization is one of the most popular approaches for between-array correction. It forces the distributions of gene expressions to be essentially identical across samples;  this assumption is justified in gene expression studies where only a few genes are expected to be differentially expressed across the samples.   Various versions of quantile normalization procedures are currently being used to preprocess DNA methylation data and have been previously compared for the 27k platform \cite{Sun2011}; here we argue, as have others  \cite{Siegmund2011}, that these methods are not appropriate for these data. Indeed, it is well-known that overall DNA methylation levels can be significantly different when tumor cells are compared to normal cells \cite{Jones2007, Lister2009}. Furthermore, even when all samples are from the same cell type, genome-wide methylation alterations can be seen.  For example, global patterns of hypomethylation with age have been seen in blood cells \cite{Fuke2004}. 
+We propose a new normalization procedure that does not assume similarity of statistical distributions across samples. Our model corrects explicitly for background intensity, dye bias and spatial effects, and allows these corrections to vary by the quantile of the signals.  We use a robust regression model to reduce the influence of outliers. To take into account the difference between Type I and Type II probes, we consider the two probe designs as two different arrays and we apply our normalization procedure separately. 
+
+\section{Example dataset: ARRm package}
+To illustrate how our method works, we use an example dataset included in the package ARRmData. The dataset contains 36 methylation profiles from the Illumina Infinium HumanMethylation 450k array.  For each sample, methylation levels are provided by a vector of Beta values. In addition, two vectors of negative probes are provided: one for the intensities in the green channel, and one for the intensities in the red channel. The matrix of Beta values for the 36 samples are contained in``betaMatrix", the negative control probes are contained in the two matrices``greenControlMatrix" and ``redControlMatrix" and the names of the samples are contained in the vector "sampleNames". We first load these data into the R environment using the following commands:
+
+<<dataLoading>>=
+library(ARRmData)
+data(greenControlMatrix)
+data(redControlMatrix)
+data(betaMatrix)
+data(sampleNames)
+@
+
+
+
+For the beta matrix, columns are samples (36 in total) and rows are probes (485,577 in total). Names of the columns are the names of the samples. 
+
+<<printBetaMatrix>>=
+betaMatrix[1:5,1:3]
+@
+
+
+
+For the negative control matrices, columns are samples (36 in total) and rows are negative control probes (600 in total). Names of the columns are the names of the samples. The order of the samples in the beta matrix must be identical to that of the samples in the negative control probe matrices. 
+
+<<printControlMatrices>>=
+greenControlMatrix[1:5,1:3]
+redControlMatrix[1:5,1:3]
+@
+
+The names of the probes for the beta matrix (following Illumina"s notation, e.g. ``cg00000029" for the first probe), is given in the file ``ProbesType.rda", located in the ARRmNormalization package:
+
+<<probesLoading>>=
+library(ARRmNormalization)
+data(ProbesType)
+head(ProbesType)
+@
+
+Names of the samples are of the form:
+
+<<printSampleNames>>=
+head(sampleNames)
+@
+
+\section{Preparing the workspace}
+
+In order to normalize your methylation profiles, you need to format the data in the same fashion as the example dataset presented above. Then you load the package ARRmNormalization:
+
+<<packageLoading>>=
+library(ARRmNormalization)
+@
+We load here also the additional package ARRmData in order to use the example dataset:
+
+<<dataPackageLoading>>=
+library(ARRmData)
+@
+
+We load the data into the workspace:
+
+<<dataLoading2>>=
+data(betaMatrix)
+data(greenControlMatrix)
+data(redControlMatrix)
+data(sampleNames)
+@
+
+\section{Pre-normalization steps}
+
+Before normalizing the methylation profiles, we need to extract the background intensities and the physical chip information of the samples. For the background extraction, we use the following command:
+
+<<getBackground>>=
+backgroundInfo <- getBackground(greenControlMatrix, redControlMatrix)
+@
+
+We get a data frame whose two columns are the medians of the background intensity of the green and red channels, respectively, for each sample.
+
+<<printBackground>>=
+head(backgroundInfo)
+@
+For the chip and position information of the samples, there are two ways to process it. The first way is to extract it from the sample names; these must be in the following format to use the extraction function:
+
+<<printSampleNames>>=
+head(sampleNames)
+@
+
+Then use the command getDesignInfo to extract the physical chip information:
+
+<<getDesignInfo>>=
+designInfo <- getDesignInfo(sampleNames)
+head(designInfo)
+@
+The first column gives a chip index, and the second column gives a position index (between 1 and 12). \\
+The second way to build the design information matrix is by providing explicit chip and position indices. For example, let's create these artificial chip and position index vectors:
+
+<<explicitDesign>>=
+myChipVector <- c(rep(1,12), rep(2, 12), rep(3, 12))
+myPositionVector <- rep(seq(1:12), 3)
+@
+
+Then the design matrix can be created with the same command as above:
+
+<<getExplicitDesign>>=
+designInfo <- getDesignInfo(sampleNames=NULL, 
+                  positionVector=myPositionVector, chipVector=myChipVector)
+head(designInfo)
+@
+
+\section{ARRm Normalization}
+
+We are now ready to normalize the methylation profiles. First, the normalization function needs three data frames similar to those of the example dataset:
+\begin{itemize}
+\item[1] a matrix of beta values where columns are samples and rows are probes
+\item[2] a designInfo data frame obtained with the getDesignInfo function
+\item[3] a backgroundInfo data frame obtained with the function getBackgroundInfo
+\end{itemize}
+By default, the percentage of outlier samples to be removed in the estimation of the bias effects is set to $2\%$; the user can choose his or her own desired percentage of outlier samples to be trimmed in the robust regression, by setting the parameter \textit{outliers.perc} to a number between 0 and 1. For instance, here we normalize all the data from the dataset example with $10\%$ of the outliers removed:
+<<firstNorm,eval=FALSE,echo=TRUE,results=verbatim>>=
+normMatrix <- 
+    normalizeARRm(betaMatrix=betaMatrix, designInfo=designInfo,
+        backgroundInfo=backgroundInfo, outliers.perc=0.1)
+@
+
+Two more options are offered to the user. The first one allows the normalization of a subset of the probes. This can be very handy since we expect that some of the probes may need to be excluded after quality control, or if the user wants to exclude probes containing SNPs, of probes mapped to sex chromosomes. In that case, the user has to build a vector of all probes names (e.g. ``cg00000029" for the first probe) to be normalized and has to pass it to the parameter \textit{goodProbes }in the function \textit{normalizeARRm}. For instance, suppose we want to normalize only half of the probes, say the even numbered probes (for example purposes only). We first construct the list of these probes:
+
+<<goodProbes>>=
+data(ProbesType) 
+goodProbes <- as.character(unlist(ProbesType$Probe_Name))[seq(1,485577,2)]
+@
+and then normalize the data with these probes only:
+<<normGoodProbes,eval=FALSE,echo=TRUE,results=verbatim>>=
+normMatrix <- 
+    normalizeARRm(betaMatrix=betaMatrix, designInfo=designInfo,
+        backgroundInfo=backgroundInfo, outliers.perc=0, goodProbes=goodProbes)
+@
+Note that normalized Beta values for the non-normalized probes are set to ``\textit{NA}". 
+The second option is to decide whether or not chip correction should be performed, by setting \textit{chipCorrection} to be true or false (by default, set to true). This can be useful if chips are confounded with important sample characteristics. For instance, if samples were allocated to chips according to gender or case-control status, chip means are confounded with these sample characteristics, and chip correction should not be performed since it would remove important biological variation. Here is an example of normalization without chip correction, on all probes:
+
+<<normWOChip,eval=FALSE,echo=TRUE,results=verbatim>>=
+normMatrix <- 
+    normalizeARRm(betaMatrix=betaMatrix, designInfo=designInfo,
+        backgroundInfo=backgroundInfo, outliers.perc=0, chipCorrection=F)
+@
+
+
+\section{Visualization}
+
+We have included visualization tools in order to investigate background, dye bias and on-chip position effects. In this section, we investigate only the non-normalized data (\textit{betaMatrix}), but visualization tools can be applied on normalized values as well, by switching \textit{betaMatrix} to \textit{normMatrix} in the examples below. To avoid long computations in plotting functions, the first step is to extract Beta value distribution quantiles for each sample, separately by probe type. This is achieved by the \textit{getQuantiles} function:
+
+<<getQuantiles>>=
+quantiles=getQuantiles(betaMatrix)
+attributes(quantiles)
+@
+In the case only a subset of probes were normalized, the option \textit{goodProbes} is available as before for the function \textit{getQuantiles} so that quantiles are only computed for these given probes:
+<<printQuantiles>>=
+quantiles=getQuantiles(betaMatrix, goodProbes=goodProbes)
+attributes(quantiles)
+@
+
+In both cases, the function \textit{getQuantiles} returns a list of three matrices that can be accessed by $\$green$, $\$red$ and $\$II$, corresponding respectively to the quantiles of the Type I green probes, Type I red probes and Type II probes. Each matrix has $100$ rows, corresponding to percentiles; columns are samples. For instance , we can look at the matrix for Type II probes:\\
+<<printQuantiles2>>=
+quantiles$II[1:5,1:4]
+@
+
+To investigate background effects and dye bias effects on percentiles, the function \textit{quantilePlots} can be applied to the quantiles extracted with the function \textit{getQuantiles}:
+
+<<quantilesPlots>>=
+quantilePlots(quantiles, backgroundInfo, designInfo)
+@
+The function has no return value, but instead makes a \textit{pdf} file (``quantilePlots.pdf") of several plots used to visualize background and dye bias effects.
+For each probe type, a plot of percentiles against background intensity is produced. For Type II probes, there is also a plot of percentiles against dye bias. One can specify which percentiles are plotted with the parameters \textit{percentilesI} and \textit{percentilesII} for Type I and Type II probes respectively. By default,  for Type I probes, $k$-th percentiles are drawn for $k \in \{5,10,\ldots,100\}$; for Type II probes, $k$-th percentiles are drawn for $k \in \{10,20,\ldots,100\}$. As an example, the corresponding plots for Type II probes, with the default list of percentiles, are presented in Figure 1 and Figure 2. Two colors are used to separate consecutive percentiles. 
+Fitted lines with non-zero slope indicate potential bias in the corresponding percentiles.
+
+<<plot1,echo=F>>=
+myColors=rep(c("black","red"),10)
+	cex=1
+	pch=rep(c(20,18),10)
+	lwd=1.5
+	percentilesI=seq(1,100,5)
+	percentilesII=seq(1,100,10)
+	y<-seq(from=-0.1,to=1,by=11/100)
+	quantilesList=list(quantiles$green, quantiles$red, quantiles$II)
+backgroundList = 
+  list(log(backgroundInfo$green), log(backgroundInfo$red), log(backgroundInfo$red*backgroundInfo$green))
+	titles=c("Background effects on different percentiles - Inf I Green",
+           "Background effects on different percentiles - Inf I Red",
+           "Background effects on different percentiles - Infinium II")
+j=3
+if (j==1 || j==2){percentiles=percentilesI} else {percentiles=percentilesII}
+		currentQuantiles=quantilesList[[j]]
+    	background=backgroundList[[j]]
+		x<-seq(from=min(background), 
+           to=max(background)+0.5, 
+               by=(max(background+0.5)-min(background))/10)
+@
+
+<<plot2,echo=F,include=F,label=fig1plot>>=
+plot(x,y,type="n",xlab="Log Background intensity",ylab="Beta value",main=titles[j])
+		for (i in 1:length(percentiles)){
+			currentP=percentiles[i]
+			points(unlist(background), 
+                 unlist(currentQuantiles[currentP,]),
+                     col=myColors[i],
+                         pch=pch[i],
+                             cex=cex)
+			abline(lm(unlist(currentQuantiles[currentP,])~background),col="black",lwd=lwd)
+		}	
+@
+
+\begin{figure}
+\begin{center}
+<<printPlot1,label=fig1,fig=TRUE,echo=FALSE>>=
+<<fig1plot>>
+@
+\end{center}
+\caption{Background effects on Type II probes}
+\label{fig:one}
+\end{figure}
+	
+	
+<<plotDyeBias,echo=F,>>=
+myColors=rep(c("black","red"),10)
+	cex=1
+	pch=rep(c(20,18),10)
+	lwd=1.5
+	percentilesI=seq(1,100,5)
+	percentilesII=seq(1,100,10)
+	y<-seq(from=-0.1,to=1,by=11/100)
+	quantilesList=list(quantiles$green,quantiles$red,quantiles$II)
+
+	## Dye bias plot
+	dyebias=log(backgroundInfo$green/backgroundInfo$red)
+	currentQuantile=quantilesList[[3]]
+	percentiles=percentilesII
+	x <- seq(from=min(dyebias),
+           to=max(dyebias)+0.5,
+               by=(max(dyebias+0.5)-min(dyebias))/10)
+@
+
+<<plotDyeBias2,echo=F,include=F,label=fig2plot>>=
+plot(x,y,type="n",xlab="Dye bias",ylab="Beta value",main="Dye bias effects on different percentiles - Infinium II" )
+		for (i in 1:length(percentiles)){
+			currentP=percentiles[i]
+			points(unlist(dyebias), 
+             unlist(currentQuantile[currentP,]), 
+                 col=myColors[i],pch=pch[i],cex=cex)
+			abline(lm(unlist(currentQuantile[currentP,])~dyebias),col="black",lwd=lwd)
+		}	
+@	
+	
+
+\begin{figure}
+\begin{center}
+<<printDyeBiasPlot,label=fig2,fig=TRUE,echo=FALSE>>=
+<<fig2plot>>
+@
+\end{center}
+\caption{Dye bias effects on Type II probes}
+\label{fig:one}
+\end{figure}
+		
+		
+
+
+
+
+
+To investigate on-chip position effects, the function \textit{positionPlots} can be applied to the quantiles previously extracted with \textit{getQuantiles}:
+
+<<positionPlots>>=
+positionPlots(quantiles, designInfo, percentiles=c(25, 50, 75))
+@
+The function has no return value, but instead makes a \textit{pdf} file (``positionPlots.pdf") of several plots used to visualize position effects. For each probe type, and for each sample, deviations from the chip mean are computed for every percentile specified by the function parameter \textit{percentiles}. For these percentiles, deviations are plotted against the position index. If spatial position has no effect on beta value distribution, points are expected to create a uniform cloud centered around zero.  An example plot is shown for the $75^{th}$ percentile of Type II probes in Figure 3.
+<<examplePositionPlots,echo=FALSE>>=
+	quantilesList= list(quantiles$green, quantiles$red, quantiles$II)
+	percentiles=c(75)
+	#### To look at the position deviations from the mean
+	grandMeansList<-list()
+	centeredQuantiles<-list()
+	for (i in 1:3){grandMeansList[[i]]=apply(quantiles[[i]],1,mean)}
+	for (i in 1:3){centeredQuantiles[[i]]=quantiles[[i]]-grandMeansList[[i]]}
+	chipCenteredQuantiles=centeredQuantiles
+	chipInfo=as.numeric(designInfo$chipInfo)
+	chipIndices=unique(as.numeric(designInfo$chipInfo))
+	for (i in 1:3){
+		currentQuantiles=chipCenteredQuantiles[[i]]
+		for (j in 1:length(chipInfo)){
+			chipQuantiles=currentQuantiles[,which(chipInfo==chipIndices[j])]
+			mean=apply(chipQuantiles,1,mean)
+			chipQuantiles=chipQuantiles-mean
+			currentQuantiles[,which(chipInfo==chipIndices[j])]=chipQuantiles
+		}
+		chipCenteredQuantiles[[i]]=currentQuantiles
+	}
+
+	### Position lines
+	order=order(designInfo$positionInfo)
+	for (i in 1:3){
+    chipCenteredQuantiles[[i]]= chipCenteredQuantiles[[i]][,order]
+	}
+	newpositions= designInfo$positionInfo[order]
+	lines=c()
+	for (i in 1:(length(newpositions)-1)){
+	if (newpositions[i+1]!=newpositions[i]){lines=c(lines,i+0.5)}
+	}
+
+	## Tick marks for position axis
+	ticks=c()
+	tick1=lines[1]/2
+	lastTick=(nrow(designInfo)+lines[11])/2
+	ticks=tick1
+	for (i in 2:11){ticks=c(ticks,(lines[i]+lines[i-1])/2)}
+	ticks=c(ticks,lastTick)
+@
+
+<<positionPlots2,echo=F,include=F,label=fig3plot>>=
+	for (percIndex in 1:length(percentiles)){
+		currentPerc=percentiles[percIndex]
+		percStr=paste("Positions Variations - ",currentPerc,"th Percentile")
+		titles=c(paste(percStr,"Inf I Green"), 
+                 paste(percStr,"Inf I Red"), 
+                     paste(percStr,"Inf II"))
+    
+		for (k in 3:3){
+			plot(chipCenteredQuantiles[[k]][currentPerc,], 
+           xaxt='n',ylab="Beta value deviations",xlab="Chip Positions",
+               cex=1,pch=20,main=titles[k])
+    
+			axis (1, at = ticks,labels=1:12)
+			abline(h=0)
+			for (j in 1:length(lines)){abline(v=lines[j],lty=2)}
+		}
+	}
+@
+
+\begin{figure}
+\begin{center}
+<<printPositionPlot,label=fig3,fig=TRUE,echo=FALSE>>=
+<<fig3plot>>
+@
+\end{center}
+\caption{Position effects for for Type II probes - $75^{th}$ percentile}
+\label{fig:one}
+\end{figure}
+		
+		
+For investigation of the coefficients estimated by the robust regression model used in the ARRm normalization, the function \textit{getCoefficients} can be used to extract the coefficients:
+<<getCoefficients>>=
+coefficients <- getCoefficients(quantiles, designInfo, backgroundInfo, outliers.perc=0.02)
+attributes(coefficients)
+@
+The function returns a list of three lists, one corresponding for each probe type, that can be accessed by $\$green$, $\$red$ and $\$II$. Each sublist contains different subfields corresponding to different effect estimates:
+
+<<printCoefficients>>=
+attributes(coefficients$II)
+@
+$\$res$ contains a vector of summary statistics for residuals. For each sample $S_i$, the statistic $\sum_{k=1}^{100}e_{i,k}^2$ is computed, where $e_{i,k}$ is the residual for the sample $S_i$ in the regression model fitted to the $k$-th percentile.\\ $\$background.vector$ contains the regression coefficient corresponding to background effect for each percentile, and $\$dyebias.vector$ contains the regression coefficient corresponding to dye bias for each percentile. For Type I probes, $\$dyebias.vector$ contains only missing values, since no dye bias doesn't apply for these probes. $\$chip.variations$ is a matrix where rows are percentiles, and columns are chip indices, and entries represent the estimated chip variations from the grand mean, for each percentile. Similarly, $\$position.variations$ is a matrix where rows are percentiles, and columns are position indices (from 1 to 12), and entries represent the estimated position variations from the corresponding chip mean, for each percentile.
+
+
+\begin{thebibliography}{9} 
+ \bibitem{Laird2010} Laird, P. W.
+   \emph{Principles and challenges of genomewide DNA methylation analysis}, 
+   Nat Rev Genet,11(3),191-203, 2010 
+   
+    \bibitem{Sun2011} Sun, Z. and Chai, H. S. and Wu, Y. and White, W. M. and Donkena, K. V. and Klein, C. J. and Garovic, V. D. and Therneau, T. M. and Kocher, J. P. 
+   \emph{Batch effect correction for genome-wide methylation data with Illumina Infinium platform}, 
+   BMC Med Genomics, 4, 84, 2011. 
+   
+    \bibitem{Siegmund2011} Siegmund, K. D.,
+       \emph{Statistical approaches for the analysis of DNA methylation microarray data}, 
+   Hum Genet, 129(6),585-95, 2011. 
+    \bibitem{Jones2007} Jones, P. A. and Baylin, S. B., 
+   \emph{The epigenomics of cancer}, 
+   Cell, 128(4), 683-92, 2007.
+    \bibitem{Lister2009} Lister, R. and Pelizzola, M. and Dowen, R. H. and Hawkins, R. D. and Hon, G. and Tonti-Filippini, J. and Nery, J. R. and Lee, L. and Ye, Z. and Ngo, Q. M. and Edsall, L. and Antosiewicz-Bourget, J. and Stewart, R. and Ruotti, V. and Millar, A. H. and Thomson, J. A. and Ren, B. and Ecker, J. R., 
+   \emph{Human DNA methylomes at base resolution show widespread epigenomic differences}, 
+   Nature, 462(7271), 315-22, 2009.
+    \bibitem{Fuke2004} Fuke, C. and Shimabukuro, M. and Petronis, A. and Sugimoto, J. and Oda, T. and Miura, K. and Miyazaki, T. and Ogura, C. and Okazaki, Y. and Jinno, Y., 
+   \emph{Age related changes in 5-methylcytosine content in human peripheral leukocytes and placentas: an HPLC-based study}, 
+  Ann Hum Genet, 68(3), 196-204, 2004.
+\end{thebibliography} 
+
+\end{document}
